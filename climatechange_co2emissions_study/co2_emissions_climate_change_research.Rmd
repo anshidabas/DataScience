@@ -1,0 +1,378 @@
+---
+title: "Project"
+author: "Anshul Dabas"
+date: "3/6/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggpubr)
+library(caret)
+library(plotROC)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+#co2 data work
+options(scipen = 999)
+co2_data<-data.frame(read.csv('final_co2Emissions_clean.csv'))
+avg_perc_chng<-c()
+binary_outcome<-c()
+for(i in 1:nrow(co2_data)){
+  perc_chngs<-c()
+  for(j in 4:ncol(co2_data)){
+    perc_chngs<-c(perc_chngs, ((co2_data[i,j]-co2_data[i,j-1])/co2_data[i,j-1])*100)
+  }
+  avg<-mean(perc_chngs)
+  avg_perc_chng<-c(avg_perc_chng, round(avg,digits = 3))
+}
+co2_data<-cbind(co2_data, avg_perc_chng)
+for(value in co2_data$avg_perc_chng){
+  if(value >= mean(co2_data$avg_perc_chng)){
+    binary_outcome<-c(binary_outcome, 0)
+  }else{
+    binary_outcome<-c(binary_outcome, 1)
+  }
+}
+final_dat_co2<-cbind(co2_data, binary_outcome)
+colnames(final_dat_co2)[18] <- "CO2BinaryOutcome"
+sum(binary_outcome)
+round(mean(final_dat_co2$avg_perc_chng), digits = 3)
+```
+CO2 plots
+```{r}
+cplot<-ggplot(data=final_dat_co2, aes(x=Country.Name,y=avg_perc_chng))+geom_point()+
+      theme(axis.text.x = element_blank()) + xlab("Country")+ylab("Average Percent Change")+ggtitle("Average Annual Percent Change in CO2 output from 2001-2014 by Country")
+cplot
+
+
+chist<-ggplot(data=final_dat_co2, aes(x=avg_perc_chng))+geom_histogram(binwidth=2)+scale_x_continuous(breaks=seq(-20,30,2))+
+  xlab("Average Percent Change")+ylab("Count")+ggtitle("CO2 emissions average annual % change")
+chist
+
+
+
+
+yrs<-data.frame(years=c('2001','2002','2003','2004','2005','2006','2007','2008','2009','2010','2011','2012','2013','2014'))
+#Croatia has an average decrease
+croatiadat<-filter(final_dat_co2,Country.Name=="Croatia")
+croatiadat<-croatiadat[-c(1:2,17,18)]
+croatiadat<-t(croatiadat)
+croatiadat<-cbind(croatiadat,yrs)
+chadplot<-ggplot(data=croatiadat, aes(x=years, y=croatiadat))+geom_point()+ylab("CO2 output")+ggtitle("Chad")
+chadplot
+
+#Angola has larger average increase
+angoladat<-filter(final_dat_co2,Country.Name=="Angola")
+angoladat<-angoladat[-c(1:2,17,18)]
+angoladat<-t(angoladat)
+angoladat<-cbind(angoladat,yrs)
+angolaaplot<-ggplot(data=angoladat, aes(x=years, y=angoladat))+geom_point()+ylab("CO2 output")+ggtitle("Angola")
+angolaaplot
+```
+
+
+```{r}
+#renewable energy
+renewable_engy_data<-data.frame(read.csv('final_renewableEnergy_clean.csv'))
+avg_perc_chng_energy<-c()
+for(i in 1:nrow(renewable_engy_data)){
+  perc_chngs_energy<-c()
+  for(j in 4:ncol(co2_data)){
+    perc_chngs_energy<-c(perc_chngs_energy, renewable_engy_data[i,j]-renewable_engy_data[i,j-1])
+  }
+  mean_perc_chng_energy<-mean(perc_chngs_energy)
+  avg_perc_chng_energy<-c(avg_perc_chng_energy, round(mean_perc_chng_energy,digits = 3))
+}
+final_dat_renewable<-cbind(renewable_engy_data, avg_perc_chng_energy)
+colnames(final_dat_renewable)[17] <- "RenewableAvgPercChange"
+round(mean(final_dat_renewable$RenewableAvgPercChange), digits = 3)
+
+#count of countries with an average increase in renewable energy consumption
+renewpos<-0
+for (i in (1:nrow(final_dat_renewable))){
+  if (final_dat_renewable$RenewableAvgPercChange[i]>0){
+    renewpos<-renewpos+1
+  }
+}
+renewpos
+```
+Renewable Plots
+```{r}
+
+rplot<-ggplot(data=final_dat_renewable, aes(x=Country.Name,y=RenewableAvgPercChange))+geom_point()+
+      theme(axis.text.x = element_blank()) + xlab("Country")+ylab("Average Percent Change")+ggtitle("Average Annual Percent Change in Renewable Energy Use from 2001-2014 by Country")
+rplot
+
+
+rhist<-ggplot(data=final_dat_renewable, aes(x=RenewableAvgPercChange))+geom_histogram(binwidth=0.25)+scale_x_continuous(breaks=seq(-5,2,.5))+
+  xlab("Average Percent Change")+ylab("Count")+ggtitle("Renewable energy consumption average annual % change")
+rhist
+
+
+
+yrs<-data.frame(years=c('2001','2002','2003','2004','2005','2006','2007','2008','2009','2010','2011','2012','2013','2014'))
+#Chad has an average decrease
+chaddat<-filter(final_dat_renewable,Country.Name=="Chad")
+chaddat<-chaddat[-c(1:2,17)]
+chaddat<-t(chaddat)
+chaddat<-cbind(chaddat,yrs)
+chadplot<-ggplot(data=chaddat, aes(x=years, y=chaddat))+geom_point()+ylab("Percent of energy consumption with renewable energy")+ggtitle("Chad")
+chadplot
+
+#Bulgaria has an average increase
+bulgariadat<-filter(final_dat_renewable,Country.Name=="Bulgaria")
+bulgariadat<-bulgariadat[-c(1:2,17)]
+bulgariadat<-t(bulgariadat)
+bulgariadat<-cbind(bulgariadat,yrs)
+bulgariaplot<-ggplot(data=bulgariadat, aes(x=years, y=bulgariadat))+geom_point()+ylab("Percent of energy consumption with renewable energy")+ggtitle("Bulgaria")
+bulgariaplot
+```
+
+
+
+
+
+```{r}
+#forest area
+forest_data<-data.frame(read.csv('final_forestArea_clean.csv'))
+avg_perc_chng_forest<-c()
+
+for(i in 1:nrow(forest_data)){
+  perc_chngs_forest<-c()
+  for(j in 4:ncol(forest_data)){
+    perc_chngs_forest<-c(perc_chngs_forest, forest_data[i,j]-forest_data[i,j-1])
+  }
+  avg_forest<-mean(perc_chngs_forest)
+  avg_perc_chng_forest<-c(avg_perc_chng_forest, round(avg_forest,digits = 3))
+}
+
+final_dat_forest<-cbind(forest_data, avg_perc_chng_forest)
+colnames(final_dat_forest)[17] <- "ForestAvgPercChange"
+round(mean(final_dat_forest$ForestAvgPercChange), digits = 3)
+
+#count of countries with an average increase in forest area
+forestpos<-0
+for (i in (1:nrow(final_dat_forest))){
+  if (final_dat_forest$ForestAvgPercChange[i]>0){
+    forestpos<-forestpos+1
+  }
+}
+forestpos
+```
+
+Forest Plots
+```{r}
+fplot<-ggplot(data=final_dat_forest, aes(x=Country.Name,y=ForestAvgPercChange))+geom_point()+
+      theme(axis.text.x = element_blank()) + xlab("Country")+ylab("Average Percent Change")+ggtitle("Average Annual Percent Change in Forest Area from 2001-2014 by Country")
+fplot
+
+
+fhist<-ggplot(data=final_dat_forest, aes(x=ForestAvgPercChange))+geom_histogram(binwidth=0.25)+scale_x_continuous(breaks=seq(-2,2,.25))+
+  xlab("Average Percent Change")+ylab("Count")+ggtitle("Forest area average annual % change")
+fhist
+
+
+yrs<-data.frame(years=c('2001','2002','2003','2004','2005','2006','2007','2008','2009','2010','2011','2012','2013','2014'))
+#Belize has an average decrease
+belizedat<-filter(final_dat_forest,Country.Name=="Belize")
+belizedat<-belizedat[-c(1:2,17)]
+belizedat<-t(belizedat)
+belizedat<-cbind(belizedat,yrs)
+belizeplot<-ggplot(data=belizedat, aes(x=years, y=belizedat))+geom_point()+ylab("Percent of land area that is forest")+ggtitle("Belize")
+belizeplot
+
+#Austra has an average increase
+austriadat<-filter(final_dat_forest,Country.Name=="Austria")
+austriadat<-austriadat[-c(1:2,17)]
+austriadat<-t(austriadat)
+austriadat<-cbind(austriadat,yrs)
+austriaplot<-ggplot(data=austriadat, aes(x=years, y=austriadat))+geom_point()+ylab("Percent of land area that is forest")+ggtitle("Austria")
+austriaplot
+
+
+#urban population
+urban_data<-data.frame(read.csv('final_urbanPop_clean.csv'))
+avg_perc_chng_urban<-c()
+for(i in 1:nrow(urban_data)){
+  perc_chngs_urban<-c()
+  for(j in 4:ncol(urban_data)){
+    perc_chngs_urban<-c(perc_chngs_urban, urban_data[i,j]-urban_data[i,j-1])
+  }
+  mean_perc_chng_urban<-mean(perc_chngs_urban)
+  avg_perc_chng_urban<-c(avg_perc_chng_urban, round(mean_perc_chng_urban,digits = 3))
+}
+final_dat_urban<-cbind(urban_data, avg_perc_chng_urban)
+colnames(final_dat_urban)[17] <- "UrbanAvgPercChange"
+round(mean(final_dat_urban$UrbanAvgPercChange), digits = 3)
+
+#count of countries with an average decrease
+urbneg<-0
+for (i in (1:nrow(final_dat_urban))){
+  if (final_dat_urban$UrbanAvgPercChange[i]<0){
+    urbneg<-urbneg+1
+  }
+}
+urbneg
+
+```
+Urban plots
+
+```{r}
+
+uplot<-ggplot(data=final_dat_urban, aes(x=Country.Name,y=UrbanAvgPercChange))+geom_point()+
+      theme(axis.text.x = element_blank()) + xlab("Country")+ylab("Average Percent Change")+ggtitle("Average Annual Percent Change in Urban Population from 2001-2014 by Country")
+uplot
+
+
+uhist<-ggplot(data=final_dat_urban, aes(x=UrbanAvgPercChange))+geom_histogram(binwidth=0.25)+scale_x_continuous(breaks=seq(-2,2,.25))+
+  xlab("Average Percent Change")+ylab("Count")+ggtitle("Urban population average annual % change")
+uhist
+
+
+yrs<-data.frame(years=c('2001','2002','2003','2004','2005','2006','2007','2008','2009','2010','2011','2012','2013','2014'))
+#Aruba has an average decrease
+arubadat<-filter(final_dat_urban,Country.Name=="Aruba")
+arubadat<-arubadat[-c(1:2,17)]
+arubadat<-t(arubadat)
+arubadat<-cbind(arubadat,yrs)
+arubaplot<-ggplot(data=arubadat, aes(x=years, y=arubadat))+geom_point()+ylab("Percent of pop that is urban")+ggtitle("Aruba")
+arubaplot
+
+#bolivia has an average increase
+boliviadat<-filter(final_dat_urban,Country.Name=="Bolivia")
+boliviadat<-boliviadat[-c(1:2,17)]
+boliviadat<-t(boliviadat)
+boliviadat<-cbind(boliviadat,yrs)
+boliviaplot<-ggplot(data=boliviadat, aes(x=years, y=boliviadat))+geom_point()+ylab("Percent of pop that is urban")+ggtitle("Bolivia")
+boliviaplot
+
+```
+
+```{r}
+#checking that all the dataframes have matching/equal countries
+forestcountries<-final_dat_forest$Country.Name
+urbancountries<-final_dat_urban$Country.Name
+renewablecountries<-final_dat_renewable$Country.Name
+co2countries<-final_dat_co2$Country.Name
+all.equal(forestcountries,urbancountries,renewablecountries,co2countries)
+```
+
+```{r}
+#consolidating all the datasets to perform logistic regression
+complete_dat<-data.frame(final_dat_co2$Country.Name,final_dat_co2$Country.Code,final_dat_forest$ForestAvgPercChange,
+                  final_dat_urban$UrbanAvgPercChange,final_dat_renewable$RenewableAvgPercChange,final_dat_co2$CO2BinaryOutcome)
+names(complete_dat)<-c("CountryName","CountryCode","Forest","Urban","Renewable","co2")
+```
+
+Training set and test set (70:30 ratio)
+```{r}
+trainsize<-round(.70*nrow(complete_dat))
+rowvec<-c(1:nrow(complete_dat))
+set.seed(123456)
+trainsetrows<-sample(rowvec,size=trainsize,replace=FALSE)
+testsetrows<-setdiff(rowvec,trainsetrows)
+testsetrows
+train_dat<-complete_dat[-testsetrows,]
+test_dat<-complete_dat[-trainsetrows,]
+```
+Plotting training set data
+```{r}
+fplot<-ggplot(data=train_dat, aes(x=Forest, y=co2))+geom_point() + 
+  geom_smooth(method=glm, method.args = list(family = "binomial"), se=FALSE)
+rplot<-ggplot(data=train_dat, aes(x=Renewable, y=co2))+geom_point() + 
+  geom_smooth(method=glm, method.args = list(family = "binomial"), se=FALSE)
+uplot<-ggplot(data=train_dat, aes(x=Urban, y=co2))+geom_point() + 
+  geom_smooth(method=glm, method.args = list(family = "binomial"), se=FALSE)
+fplot
+rplot
+uplot
+```
+
+
+Logistic regression on training set
+```{r}
+glm.fit<-glm(co2 ~ Forest+Urban+Renewable, data=train_dat, family=binomial)
+summary<-summary(glm.fit)
+summary
+```
+
+```{r}
+#checking the success rate of our model
+glm_response_scores <- predict(glm.fit, test_dat, type="response")
+glm_link_scores <- predict(glm.fit, test_dat, type="link")
+binaryfinalvec<-c()
+for (value in glm_response_scores){
+  b<-0
+  if (value>0.5){
+    b<-1
+  }
+  binaryfinalvec<-c(binaryfinalvec,b)
+}
+success<-0
+for (j in c(1:length(binaryfinalvec))){
+  if (binaryfinalvec[j]==test_dat$co2[j]){
+    success<-success+1
+  }
+}
+successrate<-success/length(binaryfinalvec)
+successrate
+```
+True 1, False 1, True 0, False 0
+```{r}
+#check type errors and specificity and sensitivity or roc curve
+predicted_vals<-binaryfinalvec
+actual_vals<-c(test_dat$co2)
+conf_matrix<-table(predicted_vals, actual_vals)
+conf_matrix
+sensitivity<-sensitivity(conf_matrix)
+specificity<-specificity(conf_matrix)
+sensitivity
+specificity
+```
+
+```{r}
+#testing randomly 10000 times the randomly arranged 0,1 in test_dat
+success_testing<-function(df){
+  success<-0
+  for (j in c(1:nrow(df))){
+    if (df$Random_co2_Binary_values[j] == test_dat$co2[j]){
+      success<-success+1
+    }
+  }
+  successrate<-success/length(binaryfinalvec)
+  return(successrate)
+ }
+
+bin_vec<-c(0,1)
+success_vals_vec<-c()
+success_eq_more_model<-0
+for(i in 1:10000){
+  random_binary_co2vals<-sample(bin_vec,size=nrow(test_dat),replace=TRUE)
+  new_test_dat<-cbind(test_dat,random_binary_co2vals)
+  colnames(new_test_dat)[7]<-"Random_co2_Binary_values"
+  success_vals<-success_testing(new_test_dat)
+  if(success_vals >= successrate){
+    success_eq_more_model<-success_eq_more_model+1
+  }
+  success_vals_vec<-c(success_vals_vec, success_vals)
+  new_test_dat<-new_test_dat[-c(7)]
+}
+mean(success_vals_vec)
+success_eq_more_model
+success_eq_more_model/10000
+```
+
+ROC curve Plotting-
+```{r}
+basicplot <- ggplot(test_dat, aes(d = test_dat$co2, m = glm_response_scores)) + geom_roc() +style_roc(theme = theme_grey)
+basicplot
+```
+

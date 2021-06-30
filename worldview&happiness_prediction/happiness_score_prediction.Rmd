@@ -1,0 +1,785 @@
+---
+title: "HappinessFinalProject"
+author: "Anshul Dabas"
+date: "6/6/2020"
+output: html_document
+---
+
+```{r}
+library(foreign)
+library(caret)
+library(ggplot2)
+library(dplyr)
+library(xgboost)
+library(devtools)
+library(usethis)
+library(readr)
+library(stringr)
+library(caret)
+library(tidyverse)
+library(haven)
+library(car)
+library(SHAPforxgboost)
+library(Seurat)
+source("shap_Func.R")
+```
+
+Code to change original sav file to csv:
+write.table(read.spss("globalattitudes.sav"), file="globalattitudes.csv", quote = FALSE, sep = ",")
+
+Import data
+```{r}
+dat_global <- read.csv(file = 'globalattitudes.csv')
+happiness_dat <- read.csv(file = 'WorldHappiness2018_data.csv')
+```
+
+Create table of happiness score and ranks
+```{r}
+countries_dat_global<-unique(dat_global$COUNTRY)
+happiness_score<-c()
+rank<-c()
+for (country in countries_dat_global){
+  x<-happiness_dat$Score[which(happiness_dat$Country==country)]
+  r<-happiness_dat$Rank[which(happiness_dat$Country==country)]
+  happiness_score<-c(happiness_score,x)
+  rank<-c(rank,r)
+}
+
+happiness_countries_score<-cbind(countries_dat_global,happiness_score,rank)
+colnames(happiness_countries_score)<-c("country","score","rank")
+happiness_countries_score<-data.frame(happiness_countries_score)
+```
+
+Add happiness score to dat_global based on country. Commented portions are to add in the country rank and grouping. We're not using this in our current project.
+```{r}
+dat_global$happiness_score <- happiness_countries_score$score[match(dat_global$COUNTRY, happiness_countries_score$country)]
+#dat_global$happiness_rank <- happiness_countries_score$rank[match(dat_global$COUNTRY, happiness_countries_score$country)]
+#dat_global$happiness_cat <- cut(as.numeric(dat_global$happiness_rank), c(-Inf,30,70,Inf), c("high", "medium", "low"))
+```
+
+```{r}
+str(dat_global)
+```
+
+Happiness score should be numeric
+```{r}
+dat_global$happiness_score<-as.numeric(as.character(dat_global$happiness_score))
+```
+
+
+Display table
+```{r}
+head(dat_global,5)
+```
+
+Plot of the variation in happiness score.
+```{r}
+ggplot(data=happiness_countries_score, aes(x=country, y=score))+geom_point()+ theme(axis.text.x = element_text(angle = 90))+ggtitle("Happiness Score by Country")+xlab("Country")+ylab("Happiness Score")
+```
+
+Drop "Survey" column
+```{r}
+dat_global<-dat_global[-2]
+```
+
+Count of respondents in each country
+```{r}
+table(dat_global$COUNTRY)
+```
+
+Number of respondents
+```{r}
+nrow(dat_global)
+```
+
+
+Remove the string "DO NOT READ" (this indicated that the survey reader would not read these responses). Not necessary for our analysis; no value added.
+```{r}
+dat_global <- data.frame(lapply(dat_global, function(x) {
+               gsub("\\ \\(DO NOT READ\\)", "", x)
+          }))
+```
+
+
+A sample of responses. The apostrophe functions st
+```{r}
+print(unique(dat_global$diversity20yr))
+```
+```{r}
+unique(dat_global$happiness_score)
+```
+
+
+The apostrophe character is odd. Let's replace it with a normal apostrophe everywhere it shows up.
+```{r}
+dat_global <- data.frame(lapply(dat_global, function(x) {
+               gsub("Donâ€™t know", "Don't know", x)
+          }))
+```
+
+Happiness score was changed to charcter in those manipulations. Back to numeric.
+```{r}
+dat_global$happiness_score<-as.numeric(as.character(dat_global$happiness_score))
+unique(dat_global$happiness_score)
+```
+
+
+Display updated values.
+```{r}
+print(unique(dat_global$diversity20yr))
+```
+
+
+
+Examine where we find missing values. Only in the follow-up questions, as expected.
+```{r}
+sapply(dat_global, function(x) sum(is.na(x)))
+```
+
+Create  follow-up indicator variable. 1 if they should be asked the follow-up and 0 if not. We'll use this to verify that the correct number were asked the follow-up.
+
+```{r}
+div <- ifelse(dat_global$diversity20yr %in% c("Refused","Don't know"),0,1)
+dat_global<-tibble::add_column(dat_global, diversity_fu_indicator = div, .after = "diversity20yr")
+
+gen <- ifelse(dat_global$gender20yr %in% c("Refused","Don't know"),0,1)
+dat_global<-tibble::add_column(dat_global, gender_fu_indicator = gen, .after = "gender20yr")
+
+rel <- ifelse(dat_global$religion20yr %in% c("Refused","Don't know"),0,1)
+dat_global<-tibble::add_column(dat_global, religion_fu_indicator = rel, .after = "religion20yr")
+
+fam <- ifelse(dat_global$family20yr %in% c("Refused","Don't know"),0,1)
+dat_global<-tibble::add_column(dat_global, family_fu_indicator = fam, .after = "family20yr")
+```
+
+
+Verify that the count of "Don't know" and "Refused" in the frist question matches the count of NA in the follow-up column:
+```{r}
+sum(dat_global$diversity_fu_indicator==0)
+sum(dat_global$family_fu_indicator==0)
+sum(dat_global$gender_fu_indicator==0)
+sum(dat_global$religion_fu_indicator==0)
+```
+
+The above values do not match the NA counts from the earlier table. We have answers to follow-up questions when we shouldn't.
+
+Below we verify that everyone who should be asked a follow-up was indeed asked.
+```{r}
+sum(dat_global$diversity_fu_indicator[which(is.na(dat_global$diversity20yr_fu))])
+sum(dat_global$family_fu_indicator[which(is.na(dat_global$family20yr_fu))])
+sum(dat_global$gender_fu_indicator[which(is.na(dat_global$gender20yr_fu))])
+sum(dat_global$religion_fu_indicator[which(is.na(dat_global$religion20yr_fu))])
+```
+
+We will first collect the IDs and countries for which there was a follow-up question discrepancy for the diversity question. This happened 24 times.
+```{r}
+nrow(filter(dat_global, (diversity_fu_indicator==0 & !is.na(diversity20yr_fu))))
+errorIDs_div<-as.character(filter(dat_global, (diversity_fu_indicator==0 & !is.na(diversity20yr_fu)))$ID)
+errorcountries<-as.character(filter(dat_global, (diversity_fu_indicator==0 & !is.na(diversity20yr_fu)))$COUNTRY)
+```
+
+Same for gender (8 issues), religion (28 issues), and family (11 issues).
+```{r}
+nrow(filter(dat_global, (gender_fu_indicator==0 & !is.na(gender20yr_fu))))
+errorIDs_gen<-as.character(filter(dat_global, (gender_fu_indicator==0 & !is.na(gender20yr_fu)))$ID)
+errorcountries<-c(errorcountries,as.character(filter(dat_global, (gender_fu_indicator==0 & !is.na(gender20yr_fu)))$COUNTRY))
+
+nrow(filter(dat_global, (religion_fu_indicator==0 & !is.na(religion20yr_fu))))
+errorIDs_rel<-as.character(filter(dat_global, (religion_fu_indicator==0 & !is.na(religion20yr_fu)))$ID)
+errorcountries<-c(errorcountries, as.character(filter(dat_global, (religion_fu_indicator==0 & !is.na(religion20yr_fu)))$COUNTRY))
+
+nrow(filter(dat_global, (family_fu_indicator==0 & !is.na(family20yr_fu))))
+errorIDs_fam<-as.character(filter(dat_global, (family_fu_indicator==0 & !is.na(family20yr_fu)))$ID)
+errorcountries<-c(errorcountries,as.character(filter(dat_global, (family_fu_indicator==0 & !is.na(family20yr_fu)))$COUNTRY))
+```
+
+
+All errors were in Mexico
+```{r}
+errorcountries<-unique(errorcountries)
+errorcountries
+```
+
+Below, we will insert an "NA" into the follow-up question. This should have been the original value since the follow-up question should not have been asked.
+```{r}
+errorIDs_div<-as.numeric(errorIDs_div)
+dat_global$diversity20yr_fu[dat_global$ID %in% errorIDs_div]<-NA
+
+errorIDs_rel<-as.numeric(errorIDs_rel)
+dat_global$religion20yr_fu[dat_global$ID %in% errorIDs_rel]<-NA
+
+errorIDs_gen<-as.numeric(errorIDs_gen)
+dat_global$gender20yr_fu[dat_global$ID %in% errorIDs_gen]<-NA
+
+errorIDs_fam<-as.numeric(errorIDs_fam)
+dat_global$family20yr_fu[dat_global$ID %in% errorIDs_fam]<-NA
+```
+
+Now we can see that the counts of NA in the follow-up and the counts of 0 in the indicator column match as expected.
+```{r}
+sum(dat_global$diversity_fu_indicator==0)
+sum(dat_global$family_fu_indicator==0)
+sum(dat_global$gender_fu_indicator==0)
+sum(dat_global$religion_fu_indicator==0)
+sapply(dat_global, function(x) sum(is.na(x)))
+```
+
+Confirm again that we don't have any conflicts.
+```{r}
+nrow(filter(dat_global, (diversity_fu_indicator==0 & !is.na(diversity20yr_fu))))
+nrow(filter(dat_global, (gender_fu_indicator==0 & !is.na(gender20yr_fu))))
+nrow(filter(dat_global, (religion_fu_indicator==0 & !is.na(religion20yr_fu))))
+nrow(filter(dat_global, (family_fu_indicator==0 & !is.na(family20yr_fu))))
+```
+
+
+For the 4 paired questions, combine a question with its follow-up into new column:
+```{r}
+dat_global$div_fu <- paste(dat_global$diversity20yr,dat_global$diversity20yr_fu)
+dat_global$rel_fu <- paste(dat_global$religion20yr,dat_global$religion20yr_fu)
+dat_global$gen_fu <- paste(dat_global$gender20yr,dat_global$gender20yr_fu)
+dat_global$fam_fu <- paste(dat_global$family20yr,dat_global$family20yr_fu)
+```
+
+
+A reminder of what is in each paired column. Follow-up questions asked for anyone who didn't answer "Don't know" or "Refused" in the first question.
+```{r}
+unique(dat_global$diversity20yr)
+unique(dat_global$diversity20yr_fu)
+```
+
+We expect 20 possible outcomes for this paired column. Verified below.
+```{r}
+length(unique(dat_global$div_fu))
+length(unique(dat_global$fam_fu))
+length(unique(dat_global$gen_fu))
+length(unique(dat_global$rel_fu))
+```
+
+A sampling of one of these new columns. That's what we want.
+```{r}
+unique(dat_global$div_fu)
+```
+
+
+
+
+
+Data exploration
+
+
+Economic situation:
+Thinking about our economic situation, how would you describe the current economic situation in (survey country) – is it very good, somewhat good, somewhat bad, or very bad? 
+
+1	Very good
+2	Somewhat good
+3	Somewhat bad
+4	Very bad
+8	Don’t know (DO NOT READ)
+9	Refused (DO NOT READ)
+Ref: econ_sit
+
+```{r}
+ggplot(data=dat_global, aes(x=econ_sit,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+ylab("Density")+ggtitle("All countries in data")+xlab("Opinion of current economic situation")
+
+a<-ggplot(data=dat_global[dat_global$COUNTRY=='United States',], aes(x=econ_sit)) +geom_histogram(stat='count', fill='black')+theme(axis.text.x = element_text(angle = 90))+ggtitle("United States")+xlab(NULL)+ylab("Count")
+b<-ggplot(data=dat_global[dat_global$COUNTRY=='Netherlands',], aes(x=econ_sit)) +geom_histogram(stat='count', fill='blue')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Netherlands")+xlab(NULL)+ylab(NULL)
+c<-ggplot(data=dat_global[dat_global$COUNTRY=='Poland',], aes(x=econ_sit)) +geom_histogram(stat='count', fill='purple')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Poland")+xlab("Opinion of current economic situation")+ylab("Count")
+d<-ggplot(data=dat_global[dat_global$COUNTRY=='Tunisia',], aes(x=econ_sit)) +geom_histogram(stat='count', fill='red')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Tunisia")+xlab("Opinion of current economic situation")+ylab(NULL)
+
+a+b+c+d
+
+
+
+```
+
+Chidren better off
+When children today in (survey country) grow up, do you think they will be better off, or worse off financially than their parents?
+
+1	Better off
+2	Worse off
+3	Same (DO NOT READ)
+8	Don’t know (DO NOT READ)	
+9	Refused (DO NOT READ)
+Ref: children_betteroff2
+
+```{r}
+ggplot(data=dat_global, aes(x=children_betteroff2,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+ylab("Density")+ggtitle("All countries in data")+xlab("Opinion of children's prospective futures as compared to their parents")
+
+a<-ggplot(data=dat_global[dat_global$COUNTRY=='United States',], aes(x=children_betteroff2)) +geom_histogram(stat='count', fill='black')+theme(axis.text.x = element_text(angle = 90))+ggtitle("United States")+xlab(NULL)+ylab("Count")
+b<-ggplot(data=dat_global[dat_global$COUNTRY=='Netherlands',], aes(x=children_betteroff2)) +geom_histogram(stat='count', fill='blue')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Netherlands")+xlab(NULL)+ylab(NULL)
+c<-ggplot(data=dat_global[dat_global$COUNTRY=='Poland',], aes(x=children_betteroff2)) +geom_histogram(stat='count', fill='purple')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Poland")+xlab("Opinion of children's prospective futures")+ylab("Count")
+d<-ggplot(data=dat_global[dat_global$COUNTRY=='Tunisia',], aes(x=children_betteroff2)) +geom_histogram(stat='count', fill='red')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Tunisia")+xlab("Opinion of children's prospective futures")+ylab(NULL)
+
+a+b+c+d
+```
+
+Satisfied with democracy
+How satisfied are you with the way democracy is working in our country – very satisfied, somewhat satisfied, not too satisfied, or not at all satisfied? 
+
+1	Very satisfied
+2	Somewhat satisfied
+3	Not too satisfied
+4	Not at all satisfied
+8	Don’t know (DO NOT READ) 
+9	Refused (DO NOT READ)
+Ref: satisfied_democracy
+
+```{r}
+ggplot(data=dat_global, aes(x=satisfied_democracy,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+xlab("Satisfaction with state of democracy")+ylab("Density")+ggtitle("All countries in data")
+
+a<-ggplot(data=dat_global[dat_global$COUNTRY=='United States',], aes(x=satisfied_democracy)) +geom_histogram(stat='count', fill='black')+theme(axis.text.x = element_text(angle = 90))+ggtitle("United States")+xlab(NULL)+ylab("Count")
+b<-ggplot(data=dat_global[dat_global$COUNTRY=='Netherlands',], aes(x=satisfied_democracy)) +geom_histogram(stat='count', fill='blue')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Netherlands")+xlab(NULL)+ylab(NULL)
+c<-ggplot(data=dat_global[dat_global$COUNTRY=='Poland',], aes(x=satisfied_democracy)) +geom_histogram(stat='count', fill='purple')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Poland")+xlab("Satisfaction with state of democracy")+ylab("Count")
+d<-ggplot(data=dat_global[dat_global$COUNTRY=='Tunisia',], aes(x=satisfied_democracy)) +geom_histogram(stat='count', fill='red')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Tunisia")+xlab("Satisfaction with state of democracy")+ylab(NULL)
+
+a+b+c+d
+```
+
+Financial
+Compared with 20 years ago, do you think the financial situation of average people in (survey country) is better, worse, or do you think there has been no change?
+
+
+1	Better 
+2	Worse
+3	No change
+8	Don’t know (DO NOT READ)
+9	Refused (DO NOT READ)
+Ref: financial20yr
+
+```{r}
+ggplot(data=dat_global, aes(x=satisfied_democracy,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+ylab("Density")+ggtitle("All countries in data")+xlab("Opinion of financial situation of average person compared to 20 years ago")
+a<-ggplot(data=dat_global[dat_global$COUNTRY=='United States',], aes(x=financial20yr)) +geom_histogram(stat='count',fill='black')+ theme(axis.text.x = element_text(angle = 90))+ggtitle("United States")+xlab(NULL)+ylab("Count")
+b<-ggplot(data=dat_global[dat_global$COUNTRY=='Netherlands',], aes(x=financial20yr)) +geom_histogram(stat='count',fill='blue')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Netherlands")+xlab(NULL)+ylab(NULL)
+c<-ggplot(data=dat_global[dat_global$COUNTRY=='Poland',], aes(x=financial20yr)) +geom_histogram(stat='count',fill='purple')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Poland")+xlab("Opinion of financial situation compared to 20 years ago")+ylab("Count")
+d<-ggplot(data=dat_global[dat_global$COUNTRY=='Tunisia',], aes(x=financial20yr)) +geom_histogram(stat='count',fill='red')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Tunisia")+xlab("Opinion of financial compared to 20 years ago")+ylab(NULL)
+
+a+b+c+d
+```
+
+Netherlands- happy- 7.441
+Tunisia- not happy- 4.592
+Poland- middle- 6.123
+United states- upper end- 6.886
+
+
+
+Diversity
+Thinking about the ethnic, religious, and racial makeup of (survey country), over the past 20 years do you think (survey country) has become more diverse, less diverse, or do you think there has been no change?
+
+
+1	More diverse
+2	Less diverse
+3	No change
+8	Don’t know (DO NOT READ)
+9	Refused (DO NOT READ)
+Ref: diversity20yr
+
+Do you think this is a good thing or a bad thing for (survey country)?
+
+
+1	Good thing
+2	Bad thing 
+3	Both (DO NOT READ)
+4	Neither (DO NOT READ)
+8	Don’t know (DO NOT READ)
+9	Refused (DO NOT READ)
+Ref: diversity20yr_fu
+
+```{r}
+ggplot(data=dat_global, aes(x=diversity20yr)) +geom_histogram(stat='count')+ylab("Count")+ggtitle("All countries")+xlab("Perception of change in diversity over last 20 years")
+ggplot(data=dat_global, aes(x=div_fu)) +geom_histogram(stat='count')+theme(axis.text.x = element_text(angle = 90))+ylab("Count")+ggtitle("All countries")+xlab("Perception of change in diversity over last 20 years and opinion on its value")+theme(axis.text.x = element_text(angle = 90))
+ggplot(data=dat_global, aes(x=diversity20yr,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+ylab("Density")+ggtitle("All countries")+xlab("Perception of change in diversity over last 20 years")
+ggplot(data=dat_global, aes(x=div_fu,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+ylab("Density")+ggtitle("All countries")+xlab("Perception of change in diversity over last 20 years and opinion on its value")
+
+ggplot(data=dat_global[dat_global$diversity20yr=='More diverse',], aes(x=diversity20yr_fu)) +geom_histogram(stat='count')+ggtitle("Respondents who said 'More Diverse'")+xlab("Opinion on diversity increasing")+ylab("Count")
+ggplot(data=dat_global[dat_global$diversity20yr=='Less diverse',], aes(x=diversity20yr_fu)) +geom_histogram(stat='count')+ggtitle("Respondents who said 'Less Diverse'")+xlab("Opinion on diversity decreasing")+ylab("Count")
+
+a<-ggplot(data=dat_global[dat_global$COUNTRY=='United States',], aes(x=div_fu)) +geom_histogram(stat='count',fill='black')+theme(axis.text.x = element_text(angle = 90))+ggtitle("United States")+ylab("Count")+xlab("Perception of change in diversity over last 20 years and opinion on its value")
+b<-ggplot(data=dat_global[dat_global$COUNTRY=='Netherlands',], aes(x=div_fu)) +geom_histogram(stat='count',fill='blue')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Netherlands")+ylab("Count")+xlab("Perception of change in diversity over last 20 years and opinion on its value")
+c<-ggplot(data=dat_global[dat_global$COUNTRY=='Poland',], aes(x=div_fu)) +geom_histogram(stat='count',fill='purple')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Poland")+ylab("Count")+xlab("Perception of change in diversity over last 20 years and opinion on its value")
+d<-ggplot(data=dat_global[dat_global$COUNTRY=='Tunisia',], aes(x=div_fu)) +geom_histogram(stat='count',fill='red')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Tunisia")+ylab("Count")+xlab("Perception of change in diversity over last 20 years and opinion on its value")
+
+a+b+c+d
+a
+b
+c
+d
+```
+
+
+Gender
+Over the past 20 years, do you think equality between men and women in (survey country) has increased, decreased, or do you think there has been no change? 
+
+
+1	Increased
+2	Decreased
+3	No change
+8	Don’t know (DO NOT READ)
+9	Refused (DO NOT READ)
+Ref: gender20yr
+
+Do you think this is a good thing or a bad thing for (survey country)? 
+
+
+1	Good thing
+2	Bad thing 
+3	Both (DO NOT READ)
+4	Neither (DO NOT READ)
+8	Don’t know (DO NOT READ)
+9	Refused (DO NOT READ)
+Ref: gender20yr_fu
+
+```{r}
+ggplot(data=dat_global, aes(x=gender20yr)) +geom_histogram(stat='count')+ylab("Count")+ggtitle("All countries")+xlab("Perception of change in gender equality over last 20 years")
+ggplot(data=dat_global, aes(x=gen_fu)) +geom_histogram(stat='count')+ylab("Count")+ggtitle("All countries")+xlab("Perception of change in gender equality over last 20 years and opinion on its value")+theme(axis.text.x = element_text(angle = 90))
+ggplot(data=dat_global, aes(x=gender20yr,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+ylab("Density")+ggtitle("All countries")+xlab("Perception of change in gender equality over last 20 years")
+ggplot(data=dat_global, aes(x=gen_fu,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+ylab("Density")+ggtitle("All countries")+xlab("Perception of change in gender equality over last 20 years and opinion on its value")
+
+ggplot(data=dat_global[dat_global$gender20yr=='Increased',], aes(x=gender20yr_fu)) +geom_histogram(stat='count')+ggtitle("Respondents who said 'Increased'")+xlab("Opinion on gender equality increasing")+ylab("Count")
+ggplot(data=dat_global[dat_global$gender20yr=='Decreased',], aes(x=gender20yr_fu)) +geom_histogram(stat='count')+ ggtitle("Respondents who said 'Decreased'")+xlab("Opinion on gender equality decreasing")+ylab("Count")
+
+a<-ggplot(data=dat_global[dat_global$COUNTRY=='United States',], aes(x=gen_fu)) +geom_histogram(stat='count',fill='black')+theme(axis.text.x = element_text(angle = 90))+ggtitle("United States")+ylab("Count")+xlab("Perception of change in gender equality over last 20 years and opinion on its value")
+b<-ggplot(data=dat_global[dat_global$COUNTRY=='Netherlands',], aes(x=gen_fu)) +geom_histogram(stat='count',fill='blue')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Netherlands")+ylab("Count")+xlab("Perception of change in gender equality over last 20 years and opinion on its value")
+c<-ggplot(data=dat_global[dat_global$COUNTRY=='Poland',], aes(x=gen_fu)) +geom_histogram(stat='count',fill='purple')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Poland")+ylab("Count")+xlab("Perception of change in gender equality over last 20 years and opinion on its value")
+d<-ggplot(data=dat_global[dat_global$COUNTRY=='Tunisia',], aes(x=gen_fu)) +geom_histogram(stat='count',fill='red')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Tunisia")+ylab("Count")+xlab("Perception of change in gender equality over last 20 years and opinion on its value")
+
+a+b+c+d
+```
+
+
+Religion
+Compared to 20 years ago, do you think religion has a more important role in (survey country), a less important role, or do you think there has been no change? 
+
+
+1	A more important role
+2	A less important role
+3	No change
+8	Don’t know (DO NOT READ)
+9	Refused (DO NOT READ)
+Ref: religion20yr
+
+Do you think this is a good thing or a bad thing for (survey country)? 
+
+
+1	Good thing
+2	Bad thing 
+3	Both (DO NOT READ)
+4	Neither (DO NOT READ)
+8	Don’t know (DO NOT READ)
+9	Refused (DO NOT READ)
+Ref: religion20yr_fu
+
+```{r}
+ggplot(data=dat_global, aes(x=religion20yr)) +geom_histogram(stat='count')+ylab("Count")+ggtitle("All countries")+xlab("Perception of change in importance of religion over last 20 years")
+ggplot(data=dat_global, aes(x=rel_fu)) +geom_histogram(stat='count')+ylab("Count")+ggtitle("All countries")+xlab("Perception of change in importance of religion over last 20 years and opinion on its value")+theme(axis.text.x = element_text(angle = 90))
+ggplot(data=dat_global, aes(x=religion20yr,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+ylab("Density")+ggtitle("All countries")+xlab("Perception of change in importance of religion over last 20 years")
+ggplot(data=dat_global, aes(x=rel_fu,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+ylab("Density")+ggtitle("All countries")+xlab("Perception of change in importance of religion over last 20 years and opinion on its value")
+
+
+ggplot(data=dat_global[dat_global$religion20yr=='A more important role',], aes(x=religion20yr_fu)) +geom_histogram(stat='count')+ggtitle("Respondents who said 'A more important role'")+xlab("Opinion on religion playing a more important role")+ylab("Count")
+ggplot(data=dat_global[dat_global$religion20yr=='A less important role',], aes(x=religion20yr_fu)) +geom_histogram(stat='count')+ggtitle("Respondents who said 'A less important role'")+xlab("Opinion on religion playing a less important role")+ylab("Count")
+
+a<-ggplot(data=dat_global[dat_global$COUNTRY=='United States',], aes(x=rel_fu)) +geom_histogram(stat='count',fill='black')+theme(axis.text.x = element_text(angle = 90))+ggtitle("United States")+ylab("Count")+xlab("Perception of change in importance of religion over last 20 years and opinion on its value")
+b<-ggplot(data=dat_global[dat_global$COUNTRY=='Netherlands',], aes(x=rel_fu)) +geom_histogram(stat='count',fill='blue')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Netherlands")+ylab("Count")+xlab("Perception of change in importance of religion over last 20 years and opinion on its value")
+c<-ggplot(data=dat_global[dat_global$COUNTRY=='Poland',], aes(x=rel_fu)) +geom_histogram(stat='count',fill='purple')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Poland")+ylab("Count")+xlab("Perception of change in importance of religion over last 20 years and opinion on its value")
+d<-ggplot(data=dat_global[dat_global$COUNTRY=='Tunisia',], aes(x=rel_fu)) +geom_histogram(stat='count',fill='red')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Tunisia")+ylab("Count")+xlab("Perception of change in importance of religion over last 20 years and opinion on its value")
+
+a+b+c+d
+```
+
+
+Family
+Over the past 20 years, do you think family ties in (survey country) have become stronger, weaker, or do you think there has been no change? 
+
+
+1	Stronger
+2	Weaker
+3	No change
+8	Don’t know (DO NOT READ)
+9	Refused (DO NOT READ)
+Ref: family20yr
+
+Do you think this is a good thing or a bad thing for (survey country)?
+
+
+1	Good thing
+2	Bad thing 
+3	Both (DO NOT READ)
+4	Neither (DO NOT READ)
+8	Don’t know (DO NOT READ)
+9	Refused (DO NOT READ)
+Ref: family20yr_fu
+
+
+```{r}
+ggplot(data=dat_global, aes(x=family20yr)) +geom_histogram(stat='count')+ylab("Count")+ggtitle("All countries")+xlab("Perception of change in strength of family ties over last 20 years")+theme(axis.text.x = element_text(angle = 90))
+ggplot(data=dat_global, aes(x=fam_fu)) +geom_histogram(stat='count')+ylab("Count")+ggtitle("All countries")+xlab("Perception of change in strength of family ties over last 20 years and opinion on its value")+theme(axis.text.x = element_text(angle = 90))
+ggplot(data=dat_global, aes(x=family20yr,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+ylab("Density")+ggtitle("All countries")+xlab("Perception of change in strength of family ties over last 20 years")
+ggplot(data=dat_global, aes(x=fam_fu,group=COUNTRY, color=COUNTRY)) +geom_density(position='dodge')+theme(axis.text.x = element_text(angle = 90))+ylab("Density")+ggtitle("All countries")+xlab("Perception of change in strength of family ties over last 20 years and opinion on its value")
+
+ggplot(data=dat_global[dat_global$family20yr=='Stronger',], aes(x=family20yr_fu)) +geom_histogram(stat='count')+ggtitle("Respondents who said 'Stronger'")+xlab("Opinion on family ties being stronger")+ylab("Count")
+ggplot(data=dat_global[dat_global$family20yr=='Weaker',], aes(x=family20yr_fu)) +geom_histogram(stat='count')+ggtitle("Respondents who said 'Weaker'")+xlab("Opinion on family ties being weaker")+ylab("Count")
+
+a<-ggplot(data=dat_global[dat_global$COUNTRY=='United States',], aes(x=fam_fu)) +geom_histogram(stat='count',fill='black')+theme(axis.text.x = element_text(angle = 90))+ggtitle("United States")+ylab("Count")+xlab("Perception of change in strength of family ties over last 20 years and opinion on its value")
+b<-ggplot(data=dat_global[dat_global$COUNTRY=='Netherlands',], aes(x=fam_fu)) +geom_histogram(stat='count',fill='blue')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Netherlands")+ylab("Count")+xlab("Perception of change in strength of family ties over last 20 years and opinion on its value")
+c<-ggplot(data=dat_global[dat_global$COUNTRY=='Poland',], aes(x=fam_fu)) +geom_histogram(stat='count',fill='purple')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Poland")+ylab("Count")+xlab("Perception of change in strength of family ties over last 20 years and opinion on its value")
+d<-ggplot(data=dat_global[dat_global$COUNTRY=='Tunisia',], aes(x=fam_fu)) +geom_histogram(stat='count',fill='red')+theme(axis.text.x = element_text(angle = 90))+ggtitle("Tunisia")+ylab("Count")+xlab("Perception of change in strength of family ties over last 20 years and opinion on its value")
+
+a+b+c+d
+```
+
+
+
+
+
+
+
+Now that we've explored out data, we will prepare the data frame to start our analysis. This starts by dropping a couple columns that are no longer necessary.
+```{r}
+head(dat_global,5)
+```
+
+Drop ID and COUNTRY
+```{r}
+dat_global<-dat_global[-c(1:2)]
+```
+
+```{r}
+head(dat_global,2)
+```
+
+Drop follow-up indicators
+```{r}
+drops <- c("diversity_fu_indicator","gender_fu_indicator","family_fu_indicator","religion_fu_indicator")
+dat_global<-dat_global[ , !(names(dat_global) %in% drops)]
+```
+
+```{r}
+head(dat_global,2)
+```
+
+At this point, the dataframe is complete with the categorical varibles.
+We have 4 questions that stand-alone:
+econ_sit
+children_betteroff2
+satisfied_democracy
+financial20yr
+As well as 4 sets of questions with follow-ups:
+diversity20yr
+diversity20yr_fu
+gender20yr
+gender20yr_fu
+religion20yr
+religion20yr_fu
+family20yr
+family20yr_fu
+Plus our outcome of interest:
+happiness_score
+
+
+Drop follow-up columns (they don't hold value for us on their own)
+```{r}
+drops <- c("diversity20yr_fu","gender20yr_fu","family20yr_fu","religion20yr_fu")
+dat_global<-dat_global[ , !(names(dat_global) %in% drops)]
+```
+
+Verify that our dataframe is correct up until this point
+```{r}
+head(dat_global,2)
+```
+
+Verify happiness_score is still in correct form
+```{r}
+unique(dat_global$happiness_score)
+```
+
+Move happiness score to beginning
+```{r}
+dat_global<-dat_global[,c(which(colnames(dat_global)=="happiness_score"),which(colnames(dat_global)!="happiness_score"))]
+```
+
+
+```{r}
+str(dat_global)
+```
+
+Train/test split
+```{r}
+set.seed(12345) 
+train_index <- sample.int(n = nrow(dat_global), size = floor(.7*nrow(dat_global)), replace = F)
+dat_train_df <- dat_global[train_index, ]
+dat_test_df  <- dat_global[-train_index, ]
+```
+
+```{r}
+all.equal(colnames(dat_test_df), colnames(dat_train_df))
+```
+
+Characters to factors
+```{r}
+dat_global[sapply(dat_global, is.character)] <- lapply(dat_global[sapply(dat_global, is.character)], 
+                                       as.factor)
+str(dat_global)
+```
+
+Create sparse matrix of just predictors
+```{r}
+sparse_matrix_train <- Matrix::sparse.model.matrix(happiness_score ~ ., data = dat_train_df,drop.unused.levels = FALSE)[,-1]
+sparse_matrix_test <- Matrix::sparse.model.matrix(happiness_score ~ ., data = dat_test_df,drop.unused.levels = FALSE)[,-1]
+```
+
+Check column names
+```{r}
+all.equal(colnames(sparse_matrix_train), colnames(sparse_matrix_test))
+```
+
+Find the error
+```{r}
+setdiff(colnames(sparse_matrix_train), colnames(sparse_matrix_test))
+```
+
+Drop that column from train
+```{r}
+nm <- c("gen_fuDecreased Refused")
+sparse_matrix_train<-sparse_matrix_train[,!colnames(sparse_matrix_train) %in% nm]
+```
+
+Check column names- good to go.
+```{r}
+all.equal(colnames(sparse_matrix_train), colnames(sparse_matrix_test))
+```
+
+
+Set the output values, "labels"
+```{r}
+output_train = dat_train_df$happiness_score
+output_test = dat_test_df$happiness_score
+```
+
+
+XGBoost input
+```{r}
+dat_train <- xgb.DMatrix(data = sparse_matrix_train,label = output_train)
+dat_test <- xgb.DMatrix(data = sparse_matrix_test,label = output_test)
+```
+
+```{r}
+dat_train
+typeof(dat_train)
+class(dat_train)
+```
+
+Set parameters
+```{r}
+param_trees <- list(booster = "gbtree"
+              , objective = "reg:linear"
+              , subsample = 0.7
+              , max_depth = 5
+              , colsample_bytree = 0.7
+              , eta = 0.037
+              , eval_metric = 'rmse'
+              , base_score = 0.012 
+              , min_child_weight = 100)
+```
+
+
+Run xv
+```{r}
+target <- output_train
+foldsCV <- createFolds(target, k=7, list=TRUE, returnTrain=FALSE)
+xgb_cv <- xgb.cv(data=dat_train,
+                 params=param_trees,
+                nrounds=100,
+                prediction=TRUE,
+                maximize=FALSE,
+                folds=foldsCV,
+                gamma=0,
+                early_stopping_rounds = 30,
+                print_every_n = 5)
+```
+
+Select best nrounds and fit model
+```{r}
+nrounds <- xgb_cv$best_iteration
+nrounds
+xgb_cv$evaluation_log[xgb_cv$best_iteration,]
+xgb.fit <- xgb.train(params = param_trees
+                 , data = dat_train
+                 , nrounds = nrounds
+                 , verbose = 1
+                 , print_every_n = 5
+                )
+```
+
+Display importance matrix
+```{r}
+importancematrix <- xgb.importance(model=xgb.fit)
+xgb.plot.importance((importance_matrix=importancematrix))
+#head(importancematrix,10)
+xgb.plot.importance(importance_matrix[1:10,])
+```
+Plot outcomes
+```{r}
+preds <- predict(xgb.fit, dat_test)
+plot(preds)
+points(dat_test_df$happiness_score, col='red')
+```
+Predicted vs actual
+```{r}
+plot(preds, dat_test_df$happiness_score, pch=16, col="blue", cex=0.75, xlab="Predicted happiness_score", ylab="Observed happiness_score", main= "XGBOOST: Observed vs. Predicted")
+lines(preds,
+lm(a~b, data=data.frame(a=dat_test_df$happiness_score, b=preds))$fitted,lwd=2, col="red")
+```
+
+
+
+Evaluation metrics
+
+```{r}
+actual<-dat_test_df$happiness_score
+
+
+rss <- sum((preds - actual) ^ 2)  ## residual sum of squares
+tss <- sum((actual - mean(actual)) ^ 2)  ## total sum of squares
+rsq <- 1 - rss/tss
+rsq
+
+
+residuals = actual-preds
+RMSE = sqrt(mean(residuals^2))
+
+RMSE
+
+```
+
+
+SHAP
+
+```{r}
+#Calculate shap values
+shap_result = shap.score.rank(xgb_model = xgb.fit, 
+                              X_train =sparse_matrix_train,
+                              shap_approx = F
+                              )
+# `shap_approx` comes from `approxcontrib` from xgboost documentation. 
+
+#Plot var importance based on SHAP
+var_importance(shap_result, top_n=10)
+
+#Prepare data for top 10 variables
+shap_long = shap.prep(shap = shap_result,
+                           X_train = sparse_matrix_train , 
+                           top_n = 10
+                           )
+
+# Plot shap overall metrics
+plot.shap.summary(data_long = shap_long)
+xgb.plot.shap(data = sparse_matrix_train, # input data
+              model = xgb.fit, # xgboost model
+              features = names(shap_result$mean_shap_score[1:10]), # only top 10 var
+              n_col = 3, # layout option
+              plot_loess = T # add red line to plot
+              )
+```
+
